@@ -14,6 +14,8 @@ defmodule ATECC508A.Request do
 
   alias ATECC508A.Transport
 
+  require Logger
+
   @type zone :: :config | :otp | :data
   @type slot :: 0..15
   @type block :: 0..3
@@ -37,6 +39,13 @@ defmodule ATECC508A.Request do
   @atecc508a_op_random 0x1B
   @atecc508a_op_sign 0x41
   @atecc508a_op_ecdh 0x43
+  @atecc508a_op_info 0x30
+  @atecc508a_op_aes 0x51
+  @atecc508a_op_checkmac 0x28
+  # TODO:
+  # CheckMac 0x28 (unlock volatile key slot)
+  #  Info 0x30 mode: 4 (get/set latch)
+  # AES 0x51 encrypt/decrypt
 
   # See https://github.com/MicrochipTech/cryptoauthlib/blob/master/lib/calib/calib_execution.c
   # for command max execution times. I'm not sure why they are different from the
@@ -128,6 +137,21 @@ defmodule ATECC508A.Request do
     |> transport_request(payload, 653, 64)
   end
 
+  def try(transport) do
+    block = 3
+    enc = <<137, 91, 20, 232, 232, 232, 232, 232, 232, 232, 232, 232, 232, 232, 232, 232>>
+    key_id = 1
+
+    for t <- 20..240 do
+      payload = <<0x51, 1::3, 0::3, block::2, key_id::16, enc::binary>>
+
+      # Timeout is arbitrary
+      IO.inspect(t)
+      result = transport_request(transport, payload, t * 20, 16)
+      IO.inspect(result)
+    end
+  end
+
   @doc """
   Create a message to lock a zone.
   """
@@ -209,6 +233,174 @@ defmodule ATECC508A.Request do
     payload = <<@atecc508a_op_ecdh, 0, 0, 0, raw_pub_key::binary>>
 
     transport_request(transport, payload, 998, 32)
+  end
+
+  @doc """
+  Get TempKey state
+  """
+  @spec get_tempkey(Transport.t()) :: {:ok, binary()} | {:error, atom()}
+  def get_tempkey(transport) do
+    payload = <<@atecc508a_op_info, 2, 0, 0>>
+
+    # Timeout is arbitrary
+    transport_request(transport, payload, 200, 4)
+  end
+
+  @doc """
+  Get persistent latch value.
+  """
+  @spec get_latch(Transport.t()) :: {:ok, binary()} | {:error, atom()}
+  def get_latch(transport) do
+    payload = <<@atecc508a_op_info, 4, 0, 0>>
+
+    # Timeout is arbitrary
+    transport_request(transport, payload, 200, 4)
+  end
+
+  @doc """
+  Set persistent latch.
+  """
+  @spec set_latch(Transport.t()) :: {:ok, binary()} | {:error, atom()}
+  def set_latch(transport) do
+    payload = <<@atecc508a_op_info, 4, 1, 0>>
+
+    # Timeout is arbitrary
+    transport_request(transport, payload, 4, 200)
+  end
+
+  @doc """
+  AES encrypt
+  """
+  @spec aes_encrypt(Transport.t(), slot(), non_neg_integer(), binary()) ::
+          {:ok, binary()} | {:error, atom()}
+  def aes_encrypt(transport, key_id, block, <<plaintext::binary-size(16)>>) when block < 4 do
+    payload = <<@atecc508a_op_aes, 0::3, 0::3, block::2, key_id::16, plaintext::binary>>
+
+    # Timeout is arbitrary
+    transport_request(transport, payload, 1000, 16)
+  end
+
+  # TODO : not confirmed working
+  @doc """
+  AES encrypt
+  """
+  @spec aes_decrypt(Transport.t(), slot(), non_neg_integer(), binary()) ::
+          {:ok, binary()} | {:error, atom()}
+  def aes_decrypt(transport, key_id, block, <<encrypted::binary-size(16)>>) when block < 4 do
+    payload = <<@atecc508a_op_aes, 1::3, 0::3, block::2, key_id::16, encrypted::binary>>
+
+    # Timeout is arbitrary
+    transport_request(transport, payload, 4000, 16)
+  end
+
+  @doc """
+  Sign a SHA256 digest.
+  """
+  @spec check_mac(Transport.t(), slot(), binary()) ::
+          {:ok, binary()} | {:error, atom()}
+  def check_mac(transport, key_id, key) do
+    pid = self()
+
+    {:ok, <<sn0_3::4-bytes, _::4-bytes, sn4_8::5-bytes, _::binary>>} =
+      read_zone(transport, :config, 0, 32)
+
+    send(pid, :a)
+
+    serial_number = sn0_3 <> sn4_8
+    <<sn0_1::2-bytes, _::5-bytes, sn8::1-bytes, _::binary>> = serial_number
+    send(pid, :b)
+    rand = :crypto.strong_rand_bytes(32)
+    digest = :crypto.hash(:sha256, rand)
+    IO.inspect({byte_size(digest), digest}, label: "digest")
+    send(pid, :c)
+
+    Transport.transaction(transport, fn request ->
+      send(pid, :d)
+      # See Table 11-33 - Mode Encoding
+      nonce_mode = <<
+        # tempkey :: ignored
+        0::2,
+        # 32 bytes
+        0::1,
+        # must be zero
+        0::3,
+        # Generate random nonce
+        0::2
+      >>
+
+      send(pid, :e)
+
+      request.(<<@atecc508a_op_nonce, nonce_mode::binary, 0::size(16), digest::binary>>, 29, 1)
+      |> tap(fn e ->
+        send(pid, {:f, e})
+      end)
+      |> interpret_result()
+      |> tap(fn e ->
+        send(pid, {:g, e})
+      end)
+      |> case do
+        {{:ok, nonce}, _retry} ->
+          send(pid, {:nonce, nonce})
+
+          msg =
+            <<0::size(2 * 8), sn0_1::binary, 0::size(4 * 8), sn8::binary, 0::size(3 * 8),
+              0::size(8 * 8), 0::size(4 * 8), nonce::binary, key::binary>>
+
+          send(pid, {:msg_size, byte_size(msg), :expect, 88})
+
+          response = :crypto.hash(:sha256, msg)
+          send(pid, {:hashed_size, byte_size(response), :expect, 32})
+
+          mode = <<
+            # must be zero
+            0::5,
+            # TempKey.sourceFlag = Rand (0)
+            0::1,
+            # Use key from keyId
+            0::1,
+            # Use nonce from TempKey
+            1::1
+          >>
+
+          request.(
+            <<@atecc508a_op_checkmac, mode::1-bytes, key_id::little-16, 0::256,
+              response::32-bytes, 0::104>>,
+            1000,
+            1
+          )
+
+        {error, _retry} ->
+          error
+      end
+    end)
+  end
+
+  @doc """
+  AES test
+  """
+  @spec aes_test(Transport.t(), non_neg_integer()) :: :ok | {:error, term()}
+  def aes_test(transport, slot) do
+    plaintext = :crypto.strong_rand_bytes(16)
+    enc = <<@atecc508a_op_aes, 1::1, 0::2, 0::3, 0::2, slot::16, plaintext::binary-size(16)>>
+
+    Transport.transaction(transport, fn request ->
+      dec = fn encrypted ->
+        <<@atecc508a_op_aes, 0::3, 0::3, 0::2, slot::16, encrypted::binary-size(16)>>
+      end
+
+      with {:encrypt, {:ok, <<_::binary-size(16)>> = encrypted}} <-
+             {:encrypt, request.(enc, 500, 16)},
+           {:decrypt, {:ok, decrypted}} <- {:decrypt, request.(dec.(encrypted), 500, 16)} do
+        if plaintext == decrypted and decrypted != encrypted do
+          :ok
+        else
+          {:error, {:mismatch, plaintext, decrypted, encrypted}}
+        end
+      else
+        {stage, other} ->
+          {:error, {stage, other}}
+      end
+    end)
   end
 
   defp zone_index(:config), do: 0
