@@ -316,6 +316,13 @@ defmodule ATECC508A.Request do
 
     Transport.transaction(transport, fn request ->
       send(pid, :d)
+      random_payload = <<@atecc508a_op_random, 0, 0, 0>>
+
+      random_result =
+        request.(random_payload, 23, 32)
+        |> interpret_result()
+
+      send(pid, {:random, random_result})
       # See Table 11-33 - Mode Encoding
       nonce_mode = <<
         # tempkey :: ignored
@@ -330,7 +337,7 @@ defmodule ATECC508A.Request do
 
       send(pid, :e)
 
-      request.(<<@atecc508a_op_nonce, nonce_mode::binary, 0::size(16), digest::binary>>, 29, 1)
+      request.(<<@atecc508a_op_nonce, nonce_mode::binary, 0::size(16), digest::binary>>, 100, 1)
       |> tap(fn e ->
         send(pid, {:f, e})
       end)
