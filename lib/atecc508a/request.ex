@@ -274,7 +274,8 @@ defmodule ATECC508A.Request do
   @spec aes_encrypt(Transport.t(), slot(), non_neg_integer(), binary()) ::
           {:ok, binary()} | {:error, atom()}
   def aes_encrypt(transport, key_id, block, <<plaintext::binary-size(16)>>) when block < 4 do
-    payload = <<@atecc508a_op_aes, 0::3, 0::3, block::2, key_id::16, plaintext::binary>>
+    mode = <<0::3, 0::3, block::2>>
+    payload = <<@atecc508a_op_aes, mode::binary, key_id::little-16, plaintext::binary>>
 
     # Timeout is arbitrary
     transport_request(transport, payload, 1000, 16)
@@ -287,10 +288,15 @@ defmodule ATECC508A.Request do
   @spec aes_decrypt(Transport.t(), slot(), non_neg_integer(), binary()) ::
           {:ok, binary()} | {:error, atom()}
   def aes_decrypt(transport, key_id, block, <<encrypted::binary-size(16)>>) when block < 4 do
-    payload = <<@atecc508a_op_aes, 1::3, 0::3, block::2, key_id::16, encrypted::binary>>
+    # <<@atecc508a_op_aes, 0::1, 0::1, 1::1, 0::3, block::2, key_id::16, encrypted::binary>>
+
+    mode = <<0b100::3, 0::3, block::2>>
+
+    payload =
+      <<@atecc508a_op_aes, mode::binary, key_id::little-16, encrypted::binary>>
 
     # Timeout is arbitrary
-    transport_request(transport, payload, 4000, 16)
+    transport_request(transport, payload, 1000, 16)
   end
 
   @doc """
