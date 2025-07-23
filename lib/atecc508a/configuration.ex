@@ -8,6 +8,7 @@ defmodule ATECC508A.Configuration do
   This module handles operations on the configuration zone.
   """
 
+  alias ATECC508A.Configuration
   alias ATECC508A.{Request, Transport}
 
   defstruct [
@@ -40,6 +41,7 @@ defmodule ATECC508A.Configuration do
           rev_num: atom() | binary(),
           i2c_address: Circuits.I2C.address(),
           aes_enable: non_neg_integer(),
+          # aka. CountMatch
           otp_mode: non_neg_integer(),
           chip_mode: non_neg_integer(),
           slot_config: <<_::256>>,
@@ -60,6 +62,98 @@ defmodule ATECC508A.Configuration do
           rfu: <<_::16>>
         }
 
+  defmodule Config608 do
+    defstruct [
+      :serial_number,
+      :rev_num,
+      :aes_enable,
+      :i2c_enable,
+      :reserved0,
+      :i2c_address,
+      :reserved1,
+      :count_match,
+      :chip_mode,
+      :slot_config,
+      :counter0,
+      :counter1,
+      :use_lock,
+      :volatile_key_permission,
+      :secure_boot,
+      :kdflvloc,
+      :kdflvstr,
+      :reserved2,
+      :user_extra,
+      :user_extra_add,
+      :lock_value,
+      :lock_config,
+      :slot_locked,
+      :chip_options,
+      :x509_format,
+      :key_config
+    ]
+
+    @type t :: %__MODULE__{
+            serial_number: binary(),
+            rev_num: atom() | binary(),
+            aes_enable: non_neg_integer(),
+            i2c_enable: non_neg_integer(),
+            reserved0: byte(),
+            i2c_address: Circuits.I2C.address(),
+            reserved1: byte(),
+            count_match: non_neg_integer(),
+            chip_mode: non_neg_integer(),
+            slot_config: <<_::256>>,
+            counter0: non_neg_integer(),
+            counter1: non_neg_integer(),
+            use_lock: binary(),
+            volatile_key_permission: non_neg_integer(),
+            secure_boot: non_neg_integer(),
+            kdflvloc: non_neg_integer(),
+            kdflvstr: non_neg_integer(),
+            reserved2: byte(),
+            user_extra: non_neg_integer(),
+            user_extra_add: non_neg_integer(),
+            lock_value: non_neg_integer(),
+            lock_config: non_neg_integer(),
+            slot_locked: non_neg_integer(),
+            chip_options: non_neg_integer(),
+            x509_format: <<_::32>>,
+            key_config: <<_::256>>
+          }
+
+    def fields do
+      [
+        serial_number_1: 4,
+        rev_num: 4,
+        serial_number_2: 5,
+        aes_enable: 1,
+        i2c_enable: 1,
+        reserved0: 1,
+        i2c_address: 1,
+        reserved1: 1,
+        count_match: 1,
+        chip_mode: 1,
+        slot_config: 32,
+        counter0: 8,
+        counter1: 8,
+        use_lock: 1,
+        volatile_key_permission: 1,
+        secure_boot: 2,
+        kdflvloc: 1,
+        kdflvstr: 2,
+        reserved2: 9,
+        user_extra: 1,
+        user_extra_add: 1,
+        lock_value: 1,
+        lock_config: 1,
+        slot_locked: 2,
+        chip_options: 2,
+        x509_format: 4,
+        key_config: 32
+      ]
+    end
+  end
+
   @doc """
   Read the configuration
   """
@@ -79,6 +173,24 @@ defmodule ATECC508A.Configuration do
   """
   @spec write(Transport.t(), t()) :: :ok | {:error, atom()}
   def write(transport, %__MODULE__{} = info) do
+    data = to_raw(info)
+
+    <<_read_only::16-bytes, writable0::16-bytes, writable1::32-bytes, writable2::20-bytes,
+      _special::8-bytes, x509::4-bytes, key_config::32-bytes>> = data
+
+    # Use 4-byte writes for everything except for writable1 and key_config which both
+    # land on 32-byte boundaries
+
+    with :ok <- multi_write(transport, 16, writable0),
+         :ok <- Request.write_zone(transport, :config, Request.to_config_addr(32), writable1),
+         :ok <- multi_write(transport, 64, writable2),
+         :ok <- multi_write(transport, 92, x509),
+         :ok <- Request.write_zone(transport, :config, Request.to_config_addr(96), key_config) do
+      :ok
+    end
+  end
+
+  def write(transport, %Config608{} = info) do
     data = to_raw(info)
 
     <<_read_only::16-bytes, writable0::16-bytes, writable1::32-bytes, writable2::20-bytes,
@@ -207,10 +319,49 @@ defmodule ATECC508A.Configuration do
   end
 
   @doc """
+  Convert a raw configuration to a nice map.
+  """
+  @spec from_raw608(<<_::1024>>) :: Config608.t()
+  def from_raw608(raw) do
+    Config608.fields()
+    |> Enum.reduce({raw, %Config608{}}, fn {field, bytes}, {raw, config} ->
+      bits = bytes * 8
+      <<value::size(bits), new_raw::binary>> = raw
+
+      {f, value} =
+        case field do
+          # Merge serial number parts
+          :serial_number_1 ->
+            <<value::binary-size(bytes), _::binary>> = raw
+            {:serial_number, value}
+
+          :serial_number_2 ->
+            <<value::binary-size(bytes), _::binary>> = raw
+            {:serial_number, config.serial_number <> value}
+
+          # handle rev number
+          :rev_num ->
+            {field, decode_rev_num(value)}
+
+          # handle volatile key data
+          :volatile_key_permission ->
+            <<value::binary-size(bytes), _::binary>> = raw
+            {field, decode_volatile_key_permission(value)}
+
+          _ ->
+            {field, value}
+        end
+
+      {new_raw, Map.put(config, f, value)}
+    end)
+    |> elem(1)
+  end
+
+  @doc """
   Convert a nice config map back to a raw configuration
   """
-  @spec to_raw(t()) :: <<_::1024>>
-  def to_raw(info) do
+  @spec to_raw(t() | Config608.t()) :: <<_::1024>>
+  def to_raw(%__MODULE__{} = info) do
     <<sn0_3::4-bytes, sn4_8::5-bytes>> = info.serial_number
     rev_num = encode_rev_num(info.rev_num)
 
@@ -220,6 +371,41 @@ defmodule ATECC508A.Configuration do
       info.last_key_use::16-bytes, info.user_extra, info.selector, info.lock_value,
       info.lock_config, info.slot_locked::little-16, info.rfu::2-bytes, info.x509_format::4-bytes,
       info.key_config::32-bytes>>
+  end
+
+  def to_raw(%Config608{} = config) do
+    Config608.fields()
+    |> Enum.reduce([], fn {field, bytes}, raw ->
+      bits = bytes * 8
+
+      case field do
+        # Merge serial number parts
+        :serial_number_1 ->
+          <<sn1::binary-size(bits), _::binary>> = config.serial_number
+          sn1
+
+        :serial_number_2 ->
+          <<_::binary-size(4), sn2::binary-size(bits)>> = config.serial_number
+          sn2
+
+        # handle rev number
+        :rev_num ->
+          encode_rev_num(config.rev_num)
+
+        # handle volatile key data
+        :volatile_key_permission ->
+          encode_volatile_key_permission(config.volatile_key_permission)
+
+        val when is_binary(val) ->
+          pad = bits - byte_size(val) * 8
+          <<0x0::size(pad), val::binary>>
+
+        val ->
+          <<val::size(bits)>>
+      end
+
+      raw
+    end)
   end
 
   # These were found by in cryptoauthlib
@@ -242,6 +428,15 @@ defmodule ATECC508A.Configuration do
   defp encode_rev_num(:ecc204_9), do: <<0x00, 0x02, 0x00, 0x09>>
   defp encode_rev_num(:ecc204_0), do: <<0x00, 0x04, 0x05, 0x08>>
   defp encode_rev_num(unknown) when byte_size(unknown) == 4, do: unknown
+
+  defp decode_volatile_key_permission(<<key::4, 0x00::3, enabled::1>>) do
+    %{key: key, enabled?: enabled == 1}
+  end
+
+  defp encode_volatile_key_permission(%{key: key, enabled?: enabled?}) do
+    enabled = if enabled?, do: 1, else: 0
+    <<key::4, 0x00::3, enabled::1>>
+  end
 
   defp multi_write(_transport, _addr, <<>>), do: :ok
 
