@@ -307,28 +307,25 @@ defmodule ATECC508A.Request do
   def check_mac(transport, key_id, key) do
     pid = self()
 
+    Logger.info("Read zone...")
+
     {:ok, <<sn0_3::4-bytes, _::4-bytes, sn4_8::5-bytes, _::binary>>} =
       read_zone(transport, :config, 0, 32)
 
-    send(pid, :a)
-
     serial_number = sn0_3 <> sn4_8
     <<sn0_1::2-bytes, _::5-bytes, sn8::1-bytes, _::binary>> = serial_number
-    send(pid, :b)
     rand = :crypto.strong_rand_bytes(32)
     digest = :crypto.hash(:sha256, rand)
-    IO.inspect({byte_size(digest), digest}, label: "digest")
-    send(pid, :c)
 
     Transport.transaction(transport, fn request ->
-      send(pid, :d)
-      random_payload = <<@atecc508a_op_random, 0, 0, 0>>
+      # random_payload = <<@atecc508a_op_random, 0, 0, 0>>
+      # Logger.info("Random payload: #{inspect(random_payload)}")
 
-      random_result =
-        request.(random_payload, 23, 32)
-        |> interpret_result()
+      # random_result =
+      #  request.(random_payload, 23, 32)
+      #  |> interpret_result()
 
-      send(pid, {:random, random_result})
+      # Logger.info("Random result: #{inspect(random_result)}")
       # See Table 11-33 - Mode Encoding
       nonce_mode = <<
         # tempkey :: ignored
@@ -341,28 +338,27 @@ defmodule ATECC508A.Request do
         0::2
       >>
 
-      send(pid, :e)
+      Logger.info("Nonce mode: #{inspect(nonce_mode)}")
 
-      request.(<<@atecc508a_op_nonce, nonce_mode::binary, 0::size(16), digest::binary>>, 100, 1)
+      request.(<<@atecc508a_op_nonce, nonce_mode::binary, 0::size(16), digest::binary>>, 100, 32)
       |> tap(fn e ->
-        send(pid, {:f, e})
+        Logger.info("Nonce result: #{inspect(e)}")
       end)
       |> interpret_result()
       |> tap(fn e ->
-        send(pid, {:g, e})
+        Logger.info("Nonce result interpreted: #{inspect(e)}")
       end)
       |> case do
         {{:ok, nonce}, _retry} ->
-          send(pid, {:nonce, nonce})
+          Logger.info("Nonce: #{inspect(nonce)}")
 
           msg =
             <<0::size(2 * 8), sn0_1::binary, 0::size(4 * 8), sn8::binary, 0::size(3 * 8),
               0::size(8 * 8), 0::size(4 * 8), nonce::binary, key::binary>>
 
-          send(pid, {:msg_size, byte_size(msg), :expect, 88})
+          Logger.info("msg size: #{byte_size(msg)}")
 
           response = :crypto.hash(:sha256, msg)
-          send(pid, {:hashed_size, byte_size(response), :expect, 32})
 
           mode = <<
             # must be zero
@@ -375,12 +371,17 @@ defmodule ATECC508A.Request do
             1::1
           >>
 
+          Logger.info("CheckMAC")
+
           request.(
             <<@atecc508a_op_checkmac, mode::1-bytes, key_id::little-16, 0::256,
               response::32-bytes, 0::104>>,
             1000,
             1
           )
+          |> tap(fn r ->
+            Logger.info("CheckMAC result: #{inspect(r)}")
+          end)
 
         {error, _retry} ->
           error

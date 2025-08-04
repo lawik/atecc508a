@@ -178,6 +178,7 @@ defmodule ATECC508A.Transport.I2CServer do
   end
 
   defp make_request(payload, timeout, response_payload_len, i2c, address) do
+    Logger.info("payload: #{inspect(payload)}")
     to_send = package(payload)
     response_len = response_payload_len + 3
 
@@ -203,6 +204,7 @@ defmodule ATECC508A.Transport.I2CServer do
   end
 
   defp extract_payload(payload_length, payload_and_crc) do
+    Logger.info("Payload length: #{payload_length}")
     Logger.info("payload and crc:" <> inspect(payload_and_crc, as: :binary))
 
     try do
