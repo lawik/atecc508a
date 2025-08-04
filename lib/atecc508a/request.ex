@@ -391,7 +391,7 @@ defmodule ATECC508A.Request do
   @doc """
   AES test
   """
-  @spec aes_test(Transport.t(), non_neg_integer()) :: :ok | {:error, term()}
+  @spec aes_test(Transport.t(), non_neg_integer()) :: {:ok, term()} | {:error, term()}
   def aes_test(transport, slot) do
     plaintext = :crypto.strong_rand_bytes(16)
     enc = <<@atecc508a_op_aes, 1::1, 0::2, 0::3, 0::2, slot::16, plaintext::binary-size(16)>>

@@ -8,7 +8,6 @@ defmodule ATECC508A.Configuration do
   This module handles operations on the configuration zone.
   """
 
-  alias ATECC508A.Configuration
   alias ATECC508A.{Request, Transport}
 
   defstruct [
@@ -41,7 +40,6 @@ defmodule ATECC508A.Configuration do
           rev_num: atom() | binary(),
           i2c_address: Circuits.I2C.address(),
           aes_enable: non_neg_integer(),
-          # aka. CountMatch
           otp_mode: non_neg_integer(),
           chip_mode: non_neg_integer(),
           slot_config: <<_::256>>,
@@ -106,7 +104,7 @@ defmodule ATECC508A.Configuration do
             counter0: non_neg_integer(),
             counter1: non_neg_integer(),
             use_lock: binary(),
-            volatile_key_permission: non_neg_integer(),
+            volatile_key_permission: %{key: non_neg_integer(), enabled?: boolean()},
             secure_boot: non_neg_integer(),
             kdflvloc: non_neg_integer(),
             kdflvstr: non_neg_integer(),
@@ -152,16 +150,39 @@ defmodule ATECC508A.Configuration do
         key_config: 32
       ]
     end
+
+    def bin_fields do
+      [
+        :serial_number,
+        :reserved0,
+        :reserved1,
+        :reserved2,
+        :slot_config,
+        :use_lock,
+        :reserved2,
+        :x509_format,
+        :key_config
+      ]
+    end
   end
 
   @doc """
   Read the configuration
   """
-  @spec read(Transport.t()) :: {:ok, t()} | {:error, atom()}
-  def read(transport) do
+  @spec read(Transport.t(), :atecc508 | :atecc608) :: {:ok, t()} | {:error, atom()}
+  def read(transport, features \\ :atecc508) do
     case read_all_raw(transport) do
-      {:ok, contents} -> {:ok, from_raw(contents)}
-      error -> error
+      {:ok, contents} ->
+        case features do
+          :atecc508 ->
+            {:ok, from_raw(contents)}
+
+          :atecc608 ->
+            {:ok, from_raw608(contents)}
+        end
+
+      error ->
+        error
     end
   end
 
@@ -323,6 +344,8 @@ defmodule ATECC508A.Configuration do
   """
   @spec from_raw608(<<_::1024>>) :: Config608.t()
   def from_raw608(raw) do
+    binfields = Config608.bin_fields()
+
     Config608.fields()
     |> Enum.reduce({raw, %Config608{}}, fn {field, bytes}, {raw, config} ->
       bits = bytes * 8
@@ -341,6 +364,7 @@ defmodule ATECC508A.Configuration do
 
           # handle rev number
           :rev_num ->
+            <<value::binary-size(bytes), _::binary>> = raw
             {field, decode_rev_num(value)}
 
           # handle volatile key data
@@ -348,8 +372,13 @@ defmodule ATECC508A.Configuration do
             <<value::binary-size(bytes), _::binary>> = raw
             {field, decode_volatile_key_permission(value)}
 
-          _ ->
-            {field, value}
+          field ->
+            if field in binfields do
+              <<value::binary-size(bytes), _::binary>> = raw
+              {field, value}
+            else
+              {field, value}
+            end
         end
 
       {new_raw, Map.put(config, f, value)}
@@ -378,34 +407,43 @@ defmodule ATECC508A.Configuration do
     |> Enum.reduce([], fn {field, bytes}, raw ->
       bits = bytes * 8
 
-      case field do
-        # Merge serial number parts
-        :serial_number_1 ->
-          <<sn1::binary-size(bits), _::binary>> = config.serial_number
-          sn1
+      val =
+        case field do
+          # Merge serial number parts
+          :serial_number_1 ->
+            <<sn1::binary-size(bytes), _::binary>> = config.serial_number
+            sn1
 
-        :serial_number_2 ->
-          <<_::binary-size(4), sn2::binary-size(bits)>> = config.serial_number
-          sn2
+          :serial_number_2 ->
+            <<_::binary-size(4), sn2::binary-size(bytes)>> = config.serial_number
+            sn2
 
-        # handle rev number
-        :rev_num ->
-          encode_rev_num(config.rev_num)
+          # handle rev number
+          :rev_num ->
+            encode_rev_num(config.rev_num)
 
-        # handle volatile key data
-        :volatile_key_permission ->
-          encode_volatile_key_permission(config.volatile_key_permission)
+          # handle volatile key data
+          :volatile_key_permission ->
+            encode_volatile_key_permission(config.volatile_key_permission)
 
-        val when is_binary(val) ->
-          pad = bits - byte_size(val) * 8
-          <<0x0::size(pad), val::binary>>
+          _ ->
+            config
+            |> Map.get(field)
+            |> padded_binary(bits)
+        end
 
-        val ->
-          <<val::size(bits)>>
-      end
-
-      raw
+      [raw, val]
     end)
+    |> IO.iodata_to_binary()
+  end
+
+  defp padded_binary(val, bits) when is_binary(val) do
+    pad = bits - byte_size(val) * 8
+    <<0x0::size(pad), val::binary>>
+  end
+
+  defp padded_binary(val, bits) do
+    <<val::size(bits)>>
   end
 
   # These were found by in cryptoauthlib
