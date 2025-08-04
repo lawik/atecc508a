@@ -274,11 +274,67 @@ defmodule ATECC508A.Request do
   @spec aes_encrypt(Transport.t(), slot(), non_neg_integer(), binary()) ::
           {:ok, binary()} | {:error, atom()}
   def aes_encrypt(transport, key_id, block, <<plaintext::binary-size(16)>>) when block < 4 do
-    mode = <<0::3, 0::3, block::2>>
+    mode = <<
+      # bits 6-7: which 16-byte block to use as secret key
+      block::2,
+      # 3-5: must be zero
+      0::3,
+      # 0-2: 0 = encrypt
+      0::3
+    >>
+
     payload = <<@atecc508a_op_aes, mode::binary, key_id::little-16, plaintext::binary>>
 
     # Timeout is arbitrary
-    transport_request(transport, payload, 1000, 16)
+    transport_request(transport, payload, 3000, 16)
+  end
+
+  def nonce_test(transport) do
+    bytes = "deadbeefdeadbeefdeadbeefdeadbeef"
+    # 1-byte nonce
+    nonce_mode = <<
+      # tempkey
+      0::2,
+      # 32 bytes
+      0::1,
+      # must be zero
+      0::3,
+      # pass-through mode
+      3::2
+    >>
+
+    Logger.info("Nonce mode: #{inspect(nonce_mode)}")
+
+    a =
+      transport_request(
+        transport,
+        <<@atecc508a_op_nonce, nonce_mode::binary, 0::size(16), bytes::binary>>,
+        100,
+        1
+      )
+
+    nonce_mode = <<
+      # tempkey :: ignored
+      0::2,
+      # 32 bytes
+      0::1,
+      # must be zero
+      0::3,
+      # Generate random nonce
+      0::2
+    >>
+
+    Logger.info("Nonce mode: #{inspect(nonce_mode)}")
+
+    b =
+      transport_request(
+        transport,
+        <<@atecc508a_op_nonce, nonce_mode::binary, 0::size(16), bytes::binary>>,
+        100,
+        32
+      )
+
+    {a, b}
   end
 
   # TODO : not confirmed working
@@ -290,13 +346,20 @@ defmodule ATECC508A.Request do
   def aes_decrypt(transport, key_id, block, <<encrypted::binary-size(16)>>) when block < 4 do
     # <<@atecc508a_op_aes, 0::1, 0::1, 1::1, 0::3, block::2, key_id::16, encrypted::binary>>
 
-    mode = <<0b100::3, 0::3, block::2>>
+    mode = <<
+      # bits 6-7: which 16-byte block to use as secret key
+      block::2,
+      # 3-5: must be zero
+      0::3,
+      # 0-2: 1 = decrypt
+      1::3
+    >>
 
     payload =
       <<@atecc508a_op_aes, mode::binary, key_id::little-16, encrypted::binary>>
 
     # Timeout is arbitrary
-    transport_request(transport, payload, 1000, 16)
+    transport_request(transport, payload, 3000, 16)
   end
 
   @doc """
@@ -304,9 +367,7 @@ defmodule ATECC508A.Request do
   """
   @spec check_mac(Transport.t(), slot(), binary()) ::
           {:ok, binary()} | {:error, atom()}
-  def check_mac(transport, key_id, key) do
-    pid = self()
-
+  def check_mac(transport, key_id, key, variant \\ :a) do
     Logger.info("Read zone...")
 
     {:ok, <<sn0_3::4-bytes, _::4-bytes, sn4_8::5-bytes, _::binary>>} =
@@ -314,8 +375,7 @@ defmodule ATECC508A.Request do
 
     serial_number = sn0_3 <> sn4_8
     <<sn0_1::2-bytes, _::5-bytes, sn8::1-bytes, _::binary>> = serial_number
-    rand = :crypto.strong_rand_bytes(32)
-    digest = :crypto.hash(:sha256, rand)
+    rand = :crypto.strong_rand_bytes(20)
 
     Transport.transaction(transport, fn request ->
       # random_payload = <<@atecc508a_op_random, 0, 0, 0>>
@@ -340,7 +400,7 @@ defmodule ATECC508A.Request do
 
       Logger.info("Nonce mode: #{inspect(nonce_mode)}")
 
-      request.(<<@atecc508a_op_nonce, nonce_mode::binary, 0::size(16), digest::binary>>, 100, 32)
+      request.(<<@atecc508a_op_nonce, nonce_mode::binary, 0::size(16), rand::binary>>, 100, 32)
       |> tap(fn e ->
         Logger.info("Nonce result: #{inspect(e)}")
       end)
@@ -353,29 +413,34 @@ defmodule ATECC508A.Request do
           Logger.info("Nonce: #{inspect(nonce)}")
 
           msg =
-            <<0::size(2 * 8), sn0_1::binary, 0::size(4 * 8), sn8::binary, 0::size(3 * 8),
-              0::size(8 * 8), 0::size(4 * 8), nonce::binary, key::binary>>
+            case variant do
+              :a ->
+                <<0::size(2 * 8), sn0_1::binary, 0::size(4 * 8), sn8::binary, 0::size(3 * 8),
+                  0::size(8 * 8), 0::size(4 * 8), nonce::binary, key::binary>>
 
-          Logger.info("msg size: #{byte_size(msg)}")
+              :b ->
+                <<key::binary, nonce::binary, 0::size(4 * 8), 0::size(8 * 8), 0::size(3 * 8),
+                  sn8::binary, 0::size(4 * 8), sn0_1::binary, 0::size(2 * 8)>>
+            end
 
-          response = :crypto.hash(:sha256, msg)
+          hashed = :crypto.hash(:sha256, msg)
 
           mode = <<
             # must be zero
             0::5,
             # TempKey.sourceFlag = Rand (0)
             0::1,
-            # Use key from keyId
+            # Use key from keyId (must be zero for volatile key authorization)
             0::1,
             # Use nonce from TempKey
             1::1
           >>
 
-          Logger.info("CheckMAC")
+          Logger.info("CheckMAC with mode: #{inspect(mode)}")
 
           request.(
-            <<@atecc508a_op_checkmac, mode::1-bytes, key_id::little-16, 0::256,
-              response::32-bytes, 0::104>>,
+            <<@atecc508a_op_checkmac, mode::1-bytes, key_id::little-16, 0::256, hashed::32-bytes,
+              0::104>>,
             1000,
             1
           )
@@ -394,27 +459,24 @@ defmodule ATECC508A.Request do
   """
   @spec aes_test(Transport.t(), non_neg_integer()) :: {:ok, term()} | {:error, term()}
   def aes_test(transport, slot) do
-    plaintext = :crypto.strong_rand_bytes(16)
-    enc = <<@atecc508a_op_aes, 1::1, 0::2, 0::3, 0::2, slot::16, plaintext::binary-size(16)>>
+    payload = :crypto.strong_rand_bytes(16)
 
-    Transport.transaction(transport, fn request ->
-      dec = fn encrypted ->
-        <<@atecc508a_op_aes, 0::3, 0::3, 0::2, slot::16, encrypted::binary-size(16)>>
-      end
+    for block <- 0..3 do
+      Logger.warning("Block: #{block}")
+      result = aes_encrypt(transport, slot, block, payload)
 
-      with {:encrypt, {:ok, <<_::binary-size(16)>> = encrypted}} <-
-             {:encrypt, request.(enc, 500, 16)},
-           {:decrypt, {:ok, decrypted}} <- {:decrypt, request.(dec.(encrypted), 500, 16)} do
-        if plaintext == decrypted and decrypted != encrypted do
-          :ok
-        else
-          {:error, {:mismatch, plaintext, decrypted, encrypted}}
-        end
-      else
-        {stage, other} ->
-          {:error, {stage, other}}
+      case result do
+        {:ok, encrypted} ->
+          Logger.warning("OK: #{inspect(result)}")
+          result = aes_decrypt(transport, slot, block, encrypted)
+          Logger.warning("result: #{inspect(result == {:ok, payload})}")
+          result
+
+        _ ->
+          Logger.error("Fail: #{inspect(result)}")
+          result
       end
-    end)
+    end
   end
 
   defp zone_index(:config), do: 0
