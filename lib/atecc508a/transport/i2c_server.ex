@@ -36,7 +36,7 @@ defmodule ATECC508A.Transport.I2CServer do
   @spec request(GenServer.server(), binary(), non_neg_integer(), non_neg_integer()) ::
           {:error, atom()} | {:ok, binary()}
   def request(server, payload, timeout, response_payload_len) do
-    GenServer.call(server, {:request, payload, timeout, response_payload_len})
+    GenServer.call(server, {:request, payload, timeout, response_payload_len}, 40_000)
   end
 
   @doc """
@@ -45,7 +45,7 @@ defmodule ATECC508A.Transport.I2CServer do
   @spec transaction(GenServer.server(), (fun() -> {:ok, any()} | {:error, atom()})) ::
           {:ok, any()} | {:error, atom()}
   def transaction(server, callback) do
-    GenServer.call(server, {:transaction, callback})
+    GenServer.call(server, {:transaction, callback}, 200_000)
   end
 
   @doc """
@@ -178,7 +178,6 @@ defmodule ATECC508A.Transport.I2CServer do
   end
 
   defp make_request(payload, timeout, response_payload_len, i2c, address) do
-    Logger.info("payload: #{inspect(payload)}")
     to_send = package(payload)
     response_len = response_payload_len + 3
 
@@ -204,9 +203,6 @@ defmodule ATECC508A.Transport.I2CServer do
   end
 
   defp extract_payload(payload_length, payload_and_crc) do
-    Logger.info("Payload length: #{payload_length}")
-    Logger.info("payload and crc:" <> inspect(payload_and_crc, as: :binary))
-
     try do
       <<payload::binary-size(payload_length), crc::binary-size(2), _extra::binary>> =
         payload_and_crc
@@ -261,7 +257,8 @@ defmodule ATECC508A.Transport.I2CServer do
   end
 
   defp poll_read(i2c, address, response_len, timeout, max_timeout) do
-    case Circuits.I2C.read(i2c, address, response_len) do
+    case Circuits.I2C.read(i2c, address, response_len)
+         |> tap(&Logger.info("poll_read: #{inspect(&1)}")) do
       {:ok, _} = response ->
         response
 
