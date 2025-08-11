@@ -438,142 +438,6 @@ defmodule ATECC508A.Request do
     serial_number = sn0_3 <> sn4_8
     IO.inspect(serial_number, label: "serial")
     <<sn0_1::2-bytes, _::6-bytes, sn8::1-bytes>> = serial_number
-    # rand = :crypto.strong_rand_bytes(20)
-    rand = "deadbeefdeadbeefdead"
-
-    # challenge = "abcdefghabcdefghabcdefghabcdefgh"
-    challenge = <<
-      0x00,
-      0x11,
-      0x22,
-      0x33,
-      0x44,
-      0x55,
-      0x66,
-      0x77,
-      0x88,
-      0x99,
-      0xAA,
-      0xBB,
-      0xCC,
-      0xDD,
-      0xEE,
-      0xFF,
-      0x01,
-      0x23,
-      0x45,
-      0x67,
-      0x89,
-      0xAB,
-      0xCD,
-      0xEF,
-      0xFE,
-      0xDC,
-      0xBA,
-      0x98,
-      0x76,
-      0x54,
-      0x32,
-      0x10
-    >>
-    # 00112233445566778899AABBCCDDEEFF0123456789ABCDEFFEDCBA9876543210
-
-    # pt_key = "abcdefghabcdefghabcdefghabcdefaa"
-    pt_key = <<
-      0x37,
-      0x80,
-      0xE6,
-      0x3D,
-      0x49,
-      0x68,
-      0xAD,
-      0xE5,
-      0xD8,
-      0x22,
-      0xC0,
-      0x13,
-      0xFC,
-      0xC3,
-      0x23,
-      0x84,
-      0x5D,
-      0x1B,
-      0x56,
-      0x9F,
-      0xE7,
-      0x05,
-      0xB6,
-      0x00,
-      0x06,
-      0xFE,
-      0xEC,
-      0x14,
-      0x5A,
-      0x0E,
-      0x26,
-      0x78
-    >>
-    # 3780E63D4968ADE5D822C013FCC323845D1B569FE705B60006FEEC145A0E2678
-
-    # 1-byte nonce
-    pt_nonce_mode = <<
-      # tempkey
-      0::2,
-      # 32 bytes
-      0::1,
-      # must be zero
-      0::3,
-      # pass-through mode
-      3::2
-    >>
-
-    simple_mac_mode = <<
-      # must be zero
-      0::1,
-      # don't do the extra OtherData serial thing
-      0::1,
-      # 1::1,
-      # must be zero
-      0::3,
-      # target SourceFlag.Input
-      1::1,
-      # Use key from keyId (must be zero for volatile key authorization)
-      1::1,
-      # Use nonce from TempKey
-      0::1
-    >>
-
-    simple_mac_req =
-      <<@atecc508a_op_mac, simple_mac_mode::binary, key_id::little-16, challenge::32-bytes>>
-
-    {:ok, mac} =
-      Transport.transaction(transport, fn r ->
-        Logger.info("PT Nonce mode: #{inspect(pt_nonce_mode)}")
-
-        {{:ok, <<0>>}, _} =
-          r.(
-            <<@atecc508a_op_nonce, pt_nonce_mode::binary, 1::1, 0::15, pt_key::binary>>,
-            100,
-            1
-          )
-          |> interpret_result()
-
-        result = r.(simple_mac_req, 1000, 32)
-        result
-      end)
-
-    Logger.info("MAC mode: #{inspect(simple_mac_mode, base: :hex)}")
-
-    {m_msg, _} =
-      build_mac_msg(pt_key, challenge, @atecc508a_op_mac, simple_mac_mode, key_id, serial_number)
-    Logger.info("MSG: #{Base.encode16(m_msg)}")
-
-    m_hash = :crypto.hash(:sha256, m_msg)
-    Logger.info("Mac  result: #{Base.encode16(m_hash)}")
-    Logger.info("Host result: #{inspect(m_hash, base: :hex)}")
-    Logger.info("Match? #{inspect(m_hash == mac)}")
-    true = m_hash == mac
-
     Transport.transaction(transport, fn request ->
       # random_payload = <<@atecc508a_op_random, 0, 0, 0>>
       # Logger.info("Random payload: #{inspect(random_payload)}")
@@ -610,6 +474,8 @@ defmodule ATECC508A.Request do
         1::1
       >>
 
+      rand = "deadbeefdeadbeefdeaddeadbeefdeadbeefdead"
+
       Logger.info("Nonce mode: #{inspect(nonce_mode)}")
       # First nonce generates a random nonce to TempKey, sets TempKey.SourceFlag = Rand
       # and returns the random value
@@ -623,11 +489,15 @@ defmodule ATECC508A.Request do
              interpret_result(request.(nonce_req_nonce, 100, 32)) do
         #           {{:ok, <<digest::32-bytes>>}, _} <- interpret_result(request.(mac_req, 1000, 32)) do
         #        Logger.info("Digest A: #{inspect(digest)}")
+        Logger.info("Nonce (random): #{inspect(nonce, base: :hex)}")
         {host_msg, other} = build_checkmac_msg(key, nonce, serial_number)
+        Logger.info("Host CHECK, msg: #{Base.encode16(host_msg)}")
         # {host_msg, other} =
         #  build_mac_msg(key, nonce, @atecc508a_op_mac, mac_mode, key_id, serial_number)
 
         host_digest = :crypto.hash(:sha256, host_msg)
+        Logger.info("Host CHECK, digest: #{Base.encode16(host_digest)}")
+
         #       Logger.info("Digest B: #{inspect(host_digest)}")
         #       Logger.info("Same? #{inspect(digest == host_digest)}")
 
@@ -812,7 +682,8 @@ defmodule ATECC508A.Request do
   defp return_status(other), do: other
 
   defp build_checkmac_msg(key, nonce, serial_number) do
-    <<sn0_1::2-bytes, _::5-bytes, sn8::1-bytes, _::binary>> = serial_number
+    <<sn0_1::2-bytes, sn2_3::2-bytes, sn4_7::4-bytes, sn8::1-bytes>> = serial_number
+    length = 88
 
     {<<
        key::32-bytes,
