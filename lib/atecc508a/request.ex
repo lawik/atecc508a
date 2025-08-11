@@ -40,6 +40,7 @@ defmodule ATECC508A.Request do
   @atecc508a_op_random 0x1B
   @atecc508a_op_sign 0x41
   @atecc508a_op_ecdh 0x43
+  @atecc508a_op_sha 0x47
   @atecc508a_op_info 0x30
   @atecc508a_op_aes 0x51
   @atecc508a_op_checkmac 0x28
@@ -397,6 +398,32 @@ defmodule ATECC508A.Request do
     {a, b}
   end
 
+  def sha(transport, data) do
+    init_mode = <<
+      0::2,
+      0::3,
+      0::3
+    >>
+
+    init_request = <<@atecc508a_op_sha::8, init_mode::binary, 0::size(16)>>
+
+    fin_mode = <<
+      1::1,
+      1::1,
+      0::3,
+      2::3
+    >>
+
+    fin_request = <<@atecc508a_op_sha, fin_mode::binary, 0::size(16), data::binary>>
+
+    Transport.transaction(transport, fn r ->
+      with {{:ok, <<0>>}, _} <- r.(init_request, 500, 1) |> interpret_result() do
+        r.(fin_request, 500, 32)
+      end
+      |> IO.inspect(label: "SHA result")
+    end)
+  end
+
   @doc """
   Sign a SHA256 digest.
   """
@@ -409,9 +436,143 @@ defmodule ATECC508A.Request do
       read_zone(transport, :config, 0, 32)
 
     serial_number = sn0_3 <> sn4_8
-    <<sn0_1::2-bytes, _::5-bytes, sn8::1-bytes, _::binary>> = serial_number
+    IO.inspect(serial_number, label: "serial")
+    <<sn0_1::2-bytes, _::6-bytes, sn8::1-bytes>> = serial_number
     # rand = :crypto.strong_rand_bytes(20)
     rand = "deadbeefdeadbeefdead"
+
+    # challenge = "abcdefghabcdefghabcdefghabcdefgh"
+    challenge = <<
+      0x00,
+      0x11,
+      0x22,
+      0x33,
+      0x44,
+      0x55,
+      0x66,
+      0x77,
+      0x88,
+      0x99,
+      0xAA,
+      0xBB,
+      0xCC,
+      0xDD,
+      0xEE,
+      0xFF,
+      0x01,
+      0x23,
+      0x45,
+      0x67,
+      0x89,
+      0xAB,
+      0xCD,
+      0xEF,
+      0xFE,
+      0xDC,
+      0xBA,
+      0x98,
+      0x76,
+      0x54,
+      0x32,
+      0x10
+    >>
+    # 00112233445566778899AABBCCDDEEFF0123456789ABCDEFFEDCBA9876543210
+
+    # pt_key = "abcdefghabcdefghabcdefghabcdefaa"
+    pt_key = <<
+      0x37,
+      0x80,
+      0xE6,
+      0x3D,
+      0x49,
+      0x68,
+      0xAD,
+      0xE5,
+      0xD8,
+      0x22,
+      0xC0,
+      0x13,
+      0xFC,
+      0xC3,
+      0x23,
+      0x84,
+      0x5D,
+      0x1B,
+      0x56,
+      0x9F,
+      0xE7,
+      0x05,
+      0xB6,
+      0x00,
+      0x06,
+      0xFE,
+      0xEC,
+      0x14,
+      0x5A,
+      0x0E,
+      0x26,
+      0x78
+    >>
+    # 3780E63D4968ADE5D822C013FCC323845D1B569FE705B60006FEEC145A0E2678
+
+    # 1-byte nonce
+    pt_nonce_mode = <<
+      # tempkey
+      0::2,
+      # 32 bytes
+      0::1,
+      # must be zero
+      0::3,
+      # pass-through mode
+      3::2
+    >>
+
+    simple_mac_mode = <<
+      # must be zero
+      0::1,
+      # don't do the extra OtherData serial thing
+      0::1,
+      # 1::1,
+      # must be zero
+      0::3,
+      # target SourceFlag.Input
+      1::1,
+      # Use key from keyId (must be zero for volatile key authorization)
+      1::1,
+      # Use nonce from TempKey
+      0::1
+    >>
+
+    simple_mac_req =
+      <<@atecc508a_op_mac, simple_mac_mode::binary, key_id::little-16, challenge::32-bytes>>
+
+    {:ok, mac} =
+      Transport.transaction(transport, fn r ->
+        Logger.info("PT Nonce mode: #{inspect(pt_nonce_mode)}")
+
+        {{:ok, <<0>>}, _} =
+          r.(
+            <<@atecc508a_op_nonce, pt_nonce_mode::binary, 1::1, 0::15, pt_key::binary>>,
+            100,
+            1
+          )
+          |> interpret_result()
+
+        result = r.(simple_mac_req, 1000, 32)
+        result
+      end)
+
+    Logger.info("MAC mode: #{inspect(simple_mac_mode, base: :hex)}")
+
+    {m_msg, _} =
+      build_mac_msg(pt_key, challenge, @atecc508a_op_mac, simple_mac_mode, key_id, serial_number)
+    Logger.info("MSG: #{Base.encode16(m_msg)}")
+
+    m_hash = :crypto.hash(:sha256, m_msg)
+    Logger.info("Mac  result: #{Base.encode16(m_hash)}")
+    Logger.info("Host result: #{inspect(m_hash, base: :hex)}")
+    Logger.info("Match? #{inspect(m_hash == mac)}")
+    true = m_hash == mac
 
     Transport.transaction(transport, fn request ->
       # random_payload = <<@atecc508a_op_random, 0, 0, 0>>
@@ -654,9 +815,9 @@ defmodule ATECC508A.Request do
     <<sn0_1::2-bytes, _::5-bytes, sn8::1-bytes, _::binary>> = serial_number
 
     {<<
-       key::16-bytes,
+       key::32-bytes,
        # pad key to 32 bytes
-       0::size(16 * 8),
+       #0::size(16 * 8),
        nonce::32-bytes,
        0::size(4 * 8),
        0::size(8 * 8),
@@ -683,24 +844,41 @@ defmodule ATECC508A.Request do
   end
 
   defp build_mac_msg(key, nonce, opcode, mode, param2, serial_number) do
-    <<sn0_1::2-bytes, _::5-bytes, sn8::1-bytes, _::binary>> = serial_number
+    # <<sn8::1-bytes-little, sn4_7::4-bytes-little, sn2_3::2-bytes-little, sn0_1::2-bytes-little>> =
+    #  serial_number
+
+    # <<sn0_1::2-bytes-little, sn2_3::2-bytes-little, sn4_7::4-bytes-little, sn8::1-bytes-little>> =
+    #  serial_number
+
+    <<sn0_1::2-bytes, sn2_3::2-bytes, sn4_7::4-bytes, sn8::1-bytes>> = serial_number
+    length = 88
+
+    msg =
+      [
+        <<
+          key::32-bytes,
+          # pad key to 32 bytes
+          #0::size(16 * 8)
+        >>,
+        <<nonce::32-bytes>>,
+        <<opcode::8>>,
+        <<mode::1-bytes>>,
+        <<param2::little-16>>,
+        <<0::size(8 * 8)>>,
+        <<0::size(3 * 8)>>,
+        <<sn8::1-bytes>>,
+        #<<sn4_7::4-bytes>>,
+        <<0::size(4 * 8)>>,
+        <<sn0_1::2-bytes>>,
+        #<<sn2_3::2-bytes>>
+        <<0::size(2 * 8)>>
+      ]
+      |> IO.iodata_to_binary()
+
+    ^length = byte_size(msg)
 
     {
-      <<
-        key::16-bytes,
-        # pad key to 32 bytes
-        0::size(16 * 8),
-        nonce::32-bytes,
-        opcode::8,
-        mode::1-bytes,
-        param2::little-16,
-        0::size(8 * 8),
-        0::size(3 * 8),
-        sn8::1-bytes,
-        0::size(4 * 8),
-        sn0_1::2-bytes,
-        0::size(2 * 8)
-      >>,
+      msg,
       # OtherData
       <<
         opcode::8,
