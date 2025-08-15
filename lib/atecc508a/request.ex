@@ -474,23 +474,27 @@ defmodule ATECC508A.Request do
         1::1
       >>
 
-      rand = "deadbeefdeadbeefdeaddeadbeefdeadbeefdead"
+      <<_::20-bytes>> = rand = "dddddddddddddddddddd"
 
       Logger.info("Nonce mode: #{inspect(nonce_mode)}")
       # First nonce generates a random nonce to TempKey, sets TempKey.SourceFlag = Rand
       # and returns the random value
       nonce_req_seed = <<@atecc508a_op_nonce, nonce_mode::binary, 0::1, 0::15, rand::binary>>
       nonce_req_nonce = <<@atecc508a_op_nonce, nonce_mode::binary, 1::1, 0::15, rand::binary>>
-      mac_req = <<@atecc508a_op_mac, mac_mode::binary, key_id::little-16>>
+ #     mac_req = <<@atecc508a_op_mac, mac_mode::binary, key_id::little-16>>
 
       # {:ok, <<nonce::32-bytes>>} <- rand_to_nonce(rng, rand, nonce_mode)
       with {{:ok, <<rng::32-bytes>>}, _} <- interpret_result(request.(nonce_req_seed, 100, 32)),
-           {{:ok, <<nonce::32-bytes>>}, _} <-
-             interpret_result(request.(nonce_req_nonce, 100, 32)) do
+      {:ok, <<nonce::32-bytes>>} <- rand_to_nonce(rng, rand, nonce_mode) do
+           #{{:ok, <<nonce::32-bytes>>}, _} <-
+     #        interpret_result(request.(nonce_req_nonce, 100, 32)) do
+        #nonce = rng
         #           {{:ok, <<digest::32-bytes>>}, _} <- interpret_result(request.(mac_req, 1000, 32)) do
         #        Logger.info("Digest A: #{inspect(digest)}")
         Logger.info("Nonce (random): #{inspect(nonce, base: :hex)}")
         {host_msg, other} = build_checkmac_msg(key, nonce, serial_number)
+        # both
+        #{host_msg, other} = build_checkmac_msg(nonce, nonce, serial_number)
         Logger.info("Host CHECK, msg: #{Base.encode16(host_msg)}")
         # {host_msg, other} =
         #  build_mac_msg(key, nonce, @atecc508a_op_mac, mac_mode, key_id, serial_number)
@@ -547,6 +551,8 @@ defmodule ATECC508A.Request do
           0::1,
           # Use key from keyId (must be zero for volatile key authorization)
           0::1,
+          # Use TempKey for both
+          #1::1,
           # Use nonce from TempKey
           1::1
         >>
@@ -566,6 +572,73 @@ defmodule ATECC508A.Request do
         err ->
           Logger.error("Failed: #{inspect(err)}")
       end
+    end)
+  end
+
+  def check_nonce(transport) do
+    Logger.info("Read zone...")
+
+    {:ok, <<sn0_3::4-bytes, _::4-bytes, sn4_8::5-bytes, _::binary>>} =
+      read_zone(transport, :config, 0, 32)
+
+    serial_number = sn0_3 <> sn4_8
+    IO.inspect(serial_number, label: "serial")
+    <<sn0_1::2-bytes, _::6-bytes, sn8::1-bytes>> = serial_number
+    Transport.transaction(transport, fn request ->
+      # See Table 11-33 - Mode Encoding
+      nonce_mode = <<
+        # target -> TempKey
+        0::2,
+        # 32 bytes
+        0::1,
+        # must be zero
+        0::3,
+        # Generate random nonce
+        0::2
+      >>
+
+      mac_mode = <<
+        # must be zero
+        0::1,
+        # don't do the extra OtherData serial thing
+        0::1,
+        # must be zero
+        0::3,
+        # target SourceFlag.Rand
+        0::1,
+        # Use key from keyId (must be zero for volatile key authorization)
+        #0::1,
+        # Use tempkey
+        1::1,
+        # Use nonce from TempKey
+        1::1
+      >>
+
+      <<_::20-bytes>> = rand = "deadbeefdeadbeefdead"
+
+      Logger.info("Nonce mode: #{inspect(nonce_mode)}")
+      # First nonce generates a random nonce to TempKey, sets TempKey.SourceFlag = Rand
+      # and returns the random value
+      nonce_req_seed = <<@atecc508a_op_nonce, nonce_mode::binary, 0::1, 0::15, rand::binary>>
+      nonce_req_nonce = <<@atecc508a_op_nonce, nonce_mode::binary, 1::1, 0::15, rand::binary>>
+      key_id = 1
+     mac_req = <<@atecc508a_op_mac, mac_mode::binary, key_id::little-16>>
+
+      with {{:ok, <<rng::32-bytes>>}, _} <- interpret_result(request.(nonce_req_seed, 100, 32)),
+          {:ok, <<nonce::32-bytes>>} <- rand_to_nonce(rng, rand, nonce_mode),
+           #{{:ok, <<nonce::32-bytes>>}, _} <- interpret_result(request.(nonce_req_nonce, 100, 32)) do
+        {{:ok, <<digest::32-bytes>>}, _} <- interpret_result(request.(mac_req, 1000, 32)) do
+        #        Logger.info("Digest A: #{inspect(digest)}")
+        Logger.info("Nonce (local): #{inspect(nonce, base: :hex)}")
+        # Use nonce for both
+        {host_msg, other} = build_mac_msg(nonce, nonce, @atecc508a_op_mac, mac_mode, key_id, serial_number)
+
+        host_digest = :crypto.hash(:sha256, host_msg)
+        Logger.info("Device digest:\n#{Base.encode16(digest)}")
+        Logger.info("Host digest:\n#{Base.encode16(host_digest)}")
+        Logger.info("Same? #{inspect(digest == host_digest)}")
+        {:ok, digest}
+        end
     end)
   end
 
