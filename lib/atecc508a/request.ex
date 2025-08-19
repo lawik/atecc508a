@@ -245,7 +245,20 @@ defmodule ATECC508A.Request do
     payload = <<@atecc508a_op_info, 2, 0, 0>>
 
     # Timeout is arbitrary
-    transport_request(transport, payload, 200, 4)
+    case transport_request(transport, payload, 200, 4) do
+      {:ok, <<no_mac::1, genkey_data::1, gendig_data::1, source_flag::1, key_id::3>>} ->
+        {:ok,
+         %{
+           no_mac: no_mac == 1,
+           gen: genkey_data == 1,
+           gen_dig: gendig_data == 1,
+           source: source_flag == 1,
+           key_id: key_id
+         }}
+
+      {error, _retry} ->
+        error
+    end
   end
 
   @doc """
@@ -264,10 +277,10 @@ defmodule ATECC508A.Request do
   """
   @spec set_latch(Transport.t()) :: {:ok, binary()} | {:error, atom()}
   def set_latch(transport) do
-    payload = <<@atecc508a_op_info, 4, 1, 0>>
+    payload = <<@atecc508a_op_info, 4, <<0::6, 1::1, 1::1>>, 0>>
 
     # Timeout is arbitrary
-    transport_request(transport, payload, 4, 200)
+    transport_request(transport, payload, 200, 4)
   end
 
   @doc """
@@ -438,6 +451,7 @@ defmodule ATECC508A.Request do
     serial_number = sn0_3 <> sn4_8
     IO.inspect(serial_number, label: "serial")
     <<sn0_1::2-bytes, _::6-bytes, sn8::1-bytes>> = serial_number
+
     Transport.transaction(transport, fn request ->
       # random_payload = <<@atecc508a_op_random, 0, 0, 0>>
       # Logger.info("Random payload: #{inspect(random_payload)}")
@@ -481,20 +495,20 @@ defmodule ATECC508A.Request do
       # and returns the random value
       nonce_req_seed = <<@atecc508a_op_nonce, nonce_mode::binary, 0::1, 0::15, rand::binary>>
       nonce_req_nonce = <<@atecc508a_op_nonce, nonce_mode::binary, 1::1, 0::15, rand::binary>>
- #     mac_req = <<@atecc508a_op_mac, mac_mode::binary, key_id::little-16>>
+      #     mac_req = <<@atecc508a_op_mac, mac_mode::binary, key_id::little-16>>
 
       # {:ok, <<nonce::32-bytes>>} <- rand_to_nonce(rng, rand, nonce_mode)
       with {{:ok, <<rng::32-bytes>>}, _} <- interpret_result(request.(nonce_req_seed, 100, 32)),
-      {:ok, <<nonce::32-bytes>>} <- rand_to_nonce(rng, rand, nonce_mode) do
-           #{{:ok, <<nonce::32-bytes>>}, _} <-
-     #        interpret_result(request.(nonce_req_nonce, 100, 32)) do
-        #nonce = rng
+           {:ok, <<nonce::32-bytes>>} <- rand_to_nonce(rng, rand, nonce_mode) do
+        # {{:ok, <<nonce::32-bytes>>}, _} <-
+        #        interpret_result(request.(nonce_req_nonce, 100, 32)) do
+        # nonce = rng
         #           {{:ok, <<digest::32-bytes>>}, _} <- interpret_result(request.(mac_req, 1000, 32)) do
         #        Logger.info("Digest A: #{inspect(digest)}")
         Logger.info("Nonce (random): #{inspect(nonce, base: :hex)}")
         {host_msg, other} = build_checkmac_msg(key, nonce, serial_number)
         # both
-        #{host_msg, other} = build_checkmac_msg(nonce, nonce, serial_number)
+        # {host_msg, other} = build_checkmac_msg(nonce, nonce, serial_number)
         Logger.info("Host CHECK, msg: #{Base.encode16(host_msg)}")
         # {host_msg, other} =
         #  build_mac_msg(key, nonce, @atecc508a_op_mac, mac_mode, key_id, serial_number)
@@ -552,22 +566,63 @@ defmodule ATECC508A.Request do
           # Use key from keyId (must be zero for volatile key authorization)
           0::1,
           # Use TempKey for both
-          #1::1,
+          # 1::1,
           # Use nonce from TempKey
           1::1
         >>
 
         Logger.info("CheckMAC with mode: #{inspect(mode)}")
 
-        request.(
+        <<_::81-bytes>> =
+          check_req =
           <<@atecc508a_op_checkmac, mode::1-bytes, key_id::little-16, 0::256,
-            host_digest::32-bytes, other::binary>>,
+            host_digest::32-bytes, other::binary>>
+
+        request.(
+          check_req,
           1000,
           1
         )
         |> tap(fn r ->
           Logger.info("CheckMAC result: #{inspect(r)}")
         end)
+
+        #Logger.info("get temp key")
+        #<<_::4-bytes>> = tmp_req = <<@atecc508a_op_info, 2, 0::16>>
+
+        # {{:ok, info}, _} =
+        #   request.(tmp_req, 998, 4)
+        #   |> interpret_result()
+
+        # Logger.info("TempKey info: #{inspect(info, as: :binary, base: :binary)}")
+
+        # Logger.info("get latch 1")
+        # {{:ok, result}, _} = request.(<<@atecc508a_op_info, 4, 0, 0>>, 998, 4)
+        # |> interpret_result()
+        # Logger.info("Latch 1 info: #{inspect(result, as: :binary, base: :binary)}")
+
+        Logger.info("set latch")
+        # <<param2::16>> = <<0::8, 0::6, 1::1, 1::1>>
+        <<param2::16>> = <<0::6, 3::2, 0::8>>
+        # <<param2::16>> = <<1::1, 0::7, 0::8>>
+        <<_::4-bytes>> = latch_req = <<@atecc508a_op_info, 4, param2::16>>
+        Logger.info("Latch req: #{inspect(latch_req)}")
+
+        {{:ok, result}, _} =
+          request.(latch_req, 998, 4)
+          |> interpret_result()
+
+        Logger.info("Latch set info: #{inspect(result, as: :binary, base: :binary)}")
+
+        # Logger.info("get latch 2")
+
+        # {{:ok, result}, _} =
+        #   request.(<<@atecc508a_op_info, 4, 0::16>>, 998, 4)
+        #   |> interpret_result()
+
+        # Logger.info("Latch 2 info: #{inspect(result, as: :binary, base: :binary)}")
+
+        {:ok, result}
       else
         err ->
           Logger.error("Failed: #{inspect(err)}")
@@ -584,6 +639,7 @@ defmodule ATECC508A.Request do
     serial_number = sn0_3 <> sn4_8
     IO.inspect(serial_number, label: "serial")
     <<sn0_1::2-bytes, _::6-bytes, sn8::1-bytes>> = serial_number
+
     Transport.transaction(transport, fn request ->
       # See Table 11-33 - Mode Encoding
       nonce_mode = <<
@@ -607,7 +663,7 @@ defmodule ATECC508A.Request do
         # target SourceFlag.Rand
         0::1,
         # Use key from keyId (must be zero for volatile key authorization)
-        #0::1,
+        # 0::1,
         # Use tempkey
         1::1,
         # Use nonce from TempKey
@@ -622,33 +678,34 @@ defmodule ATECC508A.Request do
       nonce_req_seed = <<@atecc508a_op_nonce, nonce_mode::binary, 0::1, 0::15, rand::binary>>
       nonce_req_nonce = <<@atecc508a_op_nonce, nonce_mode::binary, 1::1, 0::15, rand::binary>>
       key_id = 1
-     mac_req = <<@atecc508a_op_mac, mac_mode::binary, key_id::little-16>>
+      mac_req = <<@atecc508a_op_mac, mac_mode::binary, key_id::little-16>>
 
       with {{:ok, <<rng::32-bytes>>}, _} <- interpret_result(request.(nonce_req_seed, 100, 32)),
-          {:ok, <<nonce::32-bytes>>} <- rand_to_nonce(rng, rand, nonce_mode),
-           #{{:ok, <<nonce::32-bytes>>}, _} <- interpret_result(request.(nonce_req_nonce, 100, 32)) do
-        {{:ok, <<digest::32-bytes>>}, _} <- interpret_result(request.(mac_req, 1000, 32)) do
+           {:ok, <<nonce::32-bytes>>} <- rand_to_nonce(rng, rand, nonce_mode),
+           # {{:ok, <<nonce::32-bytes>>}, _} <- interpret_result(request.(nonce_req_nonce, 100, 32)) do
+           {{:ok, <<digest::32-bytes>>}, _} <- interpret_result(request.(mac_req, 1000, 32)) do
         #        Logger.info("Digest A: #{inspect(digest)}")
         Logger.info("Nonce (local): #{inspect(nonce, base: :hex)}")
         # Use nonce for both
-        {host_msg, other} = build_mac_msg(nonce, nonce, @atecc508a_op_mac, mac_mode, key_id, serial_number)
+        {host_msg, other} =
+          build_mac_msg(nonce, nonce, @atecc508a_op_mac, mac_mode, key_id, serial_number)
 
         host_digest = :crypto.hash(:sha256, host_msg)
         Logger.info("Device digest:\n#{Base.encode16(digest)}")
         Logger.info("Host digest:\n#{Base.encode16(host_digest)}")
         Logger.info("Same? #{inspect(digest == host_digest)}")
         {:ok, digest}
-        end
+      end
     end)
   end
 
-  def aes_test(transport) do
+  def aes_test(transport, key) do
+    slot = key
     # key = "deadbeefdeadbeef"
     # set_temp_key(transport, key)
     payload = :crypto.strong_rand_bytes(16)
 
-    for block <- 0..3,
-        slot <- 1..1 do
+    for block <- 0..3 do
       Logger.warning("Slot: #{slot} Block: #{block}")
       result = aes_encrypt(transport, slot, block, payload)
       # result = aes_encrypt(transport, 0xFFFF, block, payload)
@@ -761,7 +818,7 @@ defmodule ATECC508A.Request do
     {<<
        key::32-bytes,
        # pad key to 32 bytes
-       #0::size(16 * 8),
+       # 0::size(16 * 8),
        nonce::32-bytes,
        0::size(4 * 8),
        0::size(8 * 8),
@@ -800,9 +857,9 @@ defmodule ATECC508A.Request do
     msg =
       [
         <<
-          key::32-bytes,
+          key::32-bytes
           # pad key to 32 bytes
-          #0::size(16 * 8)
+          # 0::size(16 * 8)
         >>,
         <<nonce::32-bytes>>,
         <<opcode::8>>,
@@ -811,10 +868,10 @@ defmodule ATECC508A.Request do
         <<0::size(8 * 8)>>,
         <<0::size(3 * 8)>>,
         <<sn8::1-bytes>>,
-        #<<sn4_7::4-bytes>>,
+        # <<sn4_7::4-bytes>>,
         <<0::size(4 * 8)>>,
         <<sn0_1::2-bytes>>,
-        #<<sn2_3::2-bytes>>
+        # <<sn2_3::2-bytes>>
         <<0::size(2 * 8)>>
       ]
       |> IO.iodata_to_binary()
@@ -824,7 +881,7 @@ defmodule ATECC508A.Request do
     {
       msg,
       # OtherData
-      <<
+      <<_::13-bytes>> = <<
         opcode::8,
         mode::1-bytes,
         param2::little-16,

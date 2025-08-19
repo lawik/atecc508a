@@ -467,13 +467,17 @@ defmodule ATECC508A.Configuration do
   defp encode_rev_num(:ecc204_0), do: <<0x00, 0x04, 0x05, 0x08>>
   defp encode_rev_num(unknown) when byte_size(unknown) == 4, do: unknown
 
-  defp decode_volatile_key_permission(<<key::4, 0x00::3, enabled::1>>) do
+  # defp decode_volatile_key_permission(<<key::4, 0x00::3, enabled::1>>) do
+  #  %{key: key, enabled?: enabled == 1}
+  # end
+  defp decode_volatile_key_permission(<<enabled::1, 0x00::3, key::4>>) do
     %{key: key, enabled?: enabled == 1}
   end
 
   defp encode_volatile_key_permission(%{key: key, enabled?: enabled?}) do
     enabled = if enabled?, do: 1, else: 0
-    <<key::4, 0x00::3, enabled::1>>
+    # <<key::4, 0x00::3, enabled::1>>
+    <<enabled::1, 0x00::3, key::4>>
   end
 
   defp multi_write(_transport, _addr, <<>>), do: :ok

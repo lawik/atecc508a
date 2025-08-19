@@ -59,7 +59,7 @@ defmodule ATECC508A.Transport.I2CServer do
   @impl true
   def init([bus_name, address]) do
     {:ok, cache} = Cache.start_link()
-    {:ok, i2c} = Circuits.I2C.open(bus_name)
+    {:ok, i2c} = Circuits.I2C.open(bus_name, timeout: 1000)
 
     state = %{i2c: i2c, bus_name: bus_name, address: address, cache: cache}
     {:ok, state, {:continue, :start_asleep}}
@@ -91,15 +91,9 @@ defmodule ATECC508A.Transport.I2CServer do
   @impl true
   def handle_call({:request, payload, timeout, response_payload_len}, _from, state) do
     response =
-      case Cache.get(state.cache, payload) do
-        nil ->
-          do_transaction(state.i2c, state.address, state.cache, fn request ->
-            request.(payload, timeout, response_payload_len)
-          end)
-
-        response ->
-          response
-      end
+      do_transaction(state.i2c, state.address, state.cache, fn request ->
+        request.(payload, timeout, response_payload_len)
+      end)
 
     {:reply, response, state}
   end
@@ -123,6 +117,8 @@ defmodule ATECC508A.Transport.I2CServer do
   def package(request) do
     len = byte_size(request) + 3
     crc = ATECC508A.CRC.crc(<<len, request::binary>>)
+    bin = IO.iodata_to_binary([3, len, request, crc])
+    Logger.info("Packet: #{Base.encode16(bin)}")
     [3, len, request, crc]
   end
 
@@ -145,6 +141,8 @@ defmodule ATECC508A.Transport.I2CServer do
       case wakeup(i2c, address) do
         :ok ->
           request_fn = fn payload, timeout, response_payload_len ->
+            Logger.info("Request size: #{byte_size(payload)}")
+            Logger.info("Request: #{inspect(payload)}")
             make_cached_request(payload, timeout, response_payload_len, i2c, address, cache)
           end
 
@@ -166,15 +164,7 @@ defmodule ATECC508A.Transport.I2CServer do
   end
 
   defp make_cached_request(payload, timeout, response_payload_len, i2c, address, cache) do
-    case Cache.get(cache, payload) do
-      nil ->
-        result = make_request(payload, timeout, response_payload_len, i2c, address)
-        Cache.put(cache, payload, result)
-        result
-
-      response ->
-        response
-    end
+    make_request(payload, timeout, response_payload_len, i2c, address)
   end
 
   defp make_request(payload, timeout, response_payload_len, i2c, address) do
