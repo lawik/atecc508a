@@ -14,7 +14,6 @@ defmodule ATECC508A.Configuration do
     :serial_number,
     :rev_num,
     :i2c_address,
-    :aes_enable,
     :otp_mode,
     :chip_mode,
     :slot_config,
@@ -39,7 +38,6 @@ defmodule ATECC508A.Configuration do
           serial_number: binary(),
           rev_num: atom() | binary(),
           i2c_address: Circuits.I2C.address(),
-          aes_enable: non_neg_integer(),
           otp_mode: non_neg_integer(),
           chip_mode: non_neg_integer(),
           slot_config: <<_::256>>,
@@ -307,7 +305,7 @@ defmodule ATECC508A.Configuration do
   """
   @spec from_raw(<<_::1024>>) :: t()
   def from_raw(
-        <<sn0_3::4-bytes, rev_num::4-bytes, sn4_8::5-bytes, aes_enable, i2c_enable, reserved1,
+        <<sn0_3::4-bytes, rev_num::4-bytes, sn4_8::5-bytes, reserved0, i2c_enable, reserved1,
           i2c_address, reserved2, otp_mode, chip_mode, slot_config::32-bytes, counter0::little-64,
           counter1::little-64, last_key_use::16-bytes, user_extra, selector, lock_value,
           lock_config, slot_locked::little-16, rfu::2-bytes, x509_format::4-bytes,
@@ -317,7 +315,6 @@ defmodule ATECC508A.Configuration do
       serial_number: sn0_3 <> sn4_8,
       rev_num: decode_rev_num(rev_num),
       i2c_address: i2c_address,
-      aes_enable: aes_enable,
       otp_mode: otp_mode,
       chip_mode: chip_mode,
       slot_config: slot_config,
@@ -331,7 +328,7 @@ defmodule ATECC508A.Configuration do
       slot_locked: slot_locked,
       x509_format: x509_format,
       key_config: key_config,
-      reserved0: aes_enable,
+      reserved0: reserved0,
       reserved1: reserved1,
       reserved2: reserved2,
       i2c_enable: i2c_enable,
@@ -340,7 +337,7 @@ defmodule ATECC508A.Configuration do
   end
 
   @doc """
-  Convert a raw configuration to a nice map.
+  Convert a raw configuration to a nice map in the style of an ATECC608 chip.
   """
   @spec from_raw608(<<_::1024>>) :: Config608.t()
   def from_raw608(raw) do
@@ -394,7 +391,7 @@ defmodule ATECC508A.Configuration do
     <<sn0_3::4-bytes, sn4_8::5-bytes>> = info.serial_number
     rev_num = encode_rev_num(info.rev_num)
 
-    <<sn0_3::4-bytes, rev_num::4-bytes, sn4_8::5-bytes, info.aes_enable, info.i2c_enable,
+    <<sn0_3::4-bytes, rev_num::4-bytes, sn4_8::5-bytes, info.reserved0, info.i2c_enable,
       info.reserved1, info.i2c_address, info.reserved2, info.otp_mode, info.chip_mode,
       info.slot_config::32-bytes, info.counter0::little-64, info.counter1::little-64,
       info.last_key_use::16-bytes, info.user_extra, info.selector, info.lock_value,
