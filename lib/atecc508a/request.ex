@@ -143,9 +143,7 @@ defmodule ATECC508A.Request do
       payload = <<0x51, 1::3, 0::3, block::2, key_id::16, enc::binary>>
 
       # Timeout is arbitrary
-      IO.inspect(t)
       result = transport_request(transport, payload, t * 20, 16)
-      IO.inspect(result)
     end
   end
 
@@ -291,8 +289,6 @@ defmodule ATECC508A.Request do
       3::2
     >>
 
-    Logger.info("Setting TempKey...")
-
     transport_request(
       transport,
       <<@atecc508a_op_nonce, nonce_mode::binary, 0::size(16), bytes::binary>>,
@@ -315,8 +311,6 @@ defmodule ATECC508A.Request do
       3::2
     >>
 
-    Logger.info("Nonce mode: #{inspect(nonce_mode)}")
-
     a =
       transport_request(
         transport,
@@ -335,8 +329,6 @@ defmodule ATECC508A.Request do
       # Generate random nonce
       0::2
     >>
-
-    Logger.info("Nonce mode: #{inspect(nonce_mode)}")
 
     b =
       transport_request(
@@ -371,7 +363,6 @@ defmodule ATECC508A.Request do
       with {{:ok, <<0>>}, _} <- r.(init_request, 500, 1) |> interpret_result() do
         r.(fin_request, 500, 32)
       end
-      |> IO.inspect(label: "SHA result")
     end)
   end
 
@@ -625,7 +616,6 @@ defmodule ATECC508A.Request do
     msg =
       <<rng::32-bytes, rand::20-bytes, @atecc508a_op_nonce::8, nonce_mode::1-bytes, 0x00::8>>
 
-    Logger.info("Nonce Message: #{inspect(byte_size(msg))}")
     {:ok, :crypto.hash(:sha256, msg)}
   end
 end

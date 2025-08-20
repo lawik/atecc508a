@@ -36,7 +36,7 @@ defmodule ATECC508A.Transport.I2CServer do
   @spec request(GenServer.server(), binary(), non_neg_integer(), non_neg_integer()) ::
           {:error, atom()} | {:ok, binary()}
   def request(server, payload, timeout, response_payload_len) do
-    GenServer.call(server, {:request, payload, timeout, response_payload_len}, 40_000)
+    GenServer.call(server, {:request, payload, timeout, response_payload_len})
   end
 
   @doc """
@@ -45,7 +45,7 @@ defmodule ATECC508A.Transport.I2CServer do
   @spec transaction(GenServer.server(), (fun() -> {:ok, any()} | {:error, atom()})) ::
           {:ok, any()} | {:error, atom()}
   def transaction(server, callback) do
-    GenServer.call(server, {:transaction, callback}, 200_000)
+    GenServer.call(server, {:transaction, callback})
   end
 
   @doc """
@@ -59,7 +59,7 @@ defmodule ATECC508A.Transport.I2CServer do
   @impl true
   def init([bus_name, address]) do
     {:ok, cache} = Cache.start_link()
-    {:ok, i2c} = Circuits.I2C.open(bus_name, timeout: 1000)
+    {:ok, i2c} = Circuits.I2C.open(bus_name)
 
     state = %{i2c: i2c, bus_name: bus_name, address: address, cache: cache}
     {:ok, state, {:continue, :start_asleep}}
@@ -91,9 +91,15 @@ defmodule ATECC508A.Transport.I2CServer do
   @impl true
   def handle_call({:request, payload, timeout, response_payload_len}, _from, state) do
     response =
-      do_transaction(state.i2c, state.address, state.cache, fn request ->
-        request.(payload, timeout, response_payload_len)
-      end)
+      case Cache.get(state.cache, payload) do
+        nil ->
+          do_transaction(state.i2c, state.address, state.cache, fn request ->
+            request.(payload, timeout, response_payload_len)
+          end)
+
+        response ->
+          response
+      end
 
     {:reply, response, state}
   end
@@ -117,8 +123,6 @@ defmodule ATECC508A.Transport.I2CServer do
   def package(request) do
     len = byte_size(request) + 3
     crc = ATECC508A.CRC.crc(<<len, request::binary>>)
-    bin = IO.iodata_to_binary([3, len, request, crc])
-    Logger.info("Packet: #{Base.encode16(bin)}")
     [3, len, request, crc]
   end
 
@@ -141,8 +145,6 @@ defmodule ATECC508A.Transport.I2CServer do
       case wakeup(i2c, address) do
         :ok ->
           request_fn = fn payload, timeout, response_payload_len ->
-            Logger.info("Request size: #{byte_size(payload)}")
-            Logger.info("Request: #{inspect(payload)}")
             make_cached_request(payload, timeout, response_payload_len, i2c, address, cache)
           end
 
@@ -164,7 +166,15 @@ defmodule ATECC508A.Transport.I2CServer do
   end
 
   defp make_cached_request(payload, timeout, response_payload_len, i2c, address, cache) do
-    make_request(payload, timeout, response_payload_len, i2c, address)
+    case Cache.get(cache, payload) do
+      nil ->
+        result = make_request(payload, timeout, response_payload_len, i2c, address)
+        Cache.put(cache, payload, result)
+        result
+
+      response ->
+        response
+    end
   end
 
   defp make_request(payload, timeout, response_payload_len, i2c, address) do
@@ -247,8 +257,7 @@ defmodule ATECC508A.Transport.I2CServer do
   end
 
   defp poll_read(i2c, address, response_len, timeout, max_timeout) do
-    case Circuits.I2C.read(i2c, address, response_len)
-         |> tap(&Logger.info("poll_read: #{inspect(&1)}")) do
+    case Circuits.I2C.read(i2c, address, response_len) do
       {:ok, _} = response ->
         response
 
