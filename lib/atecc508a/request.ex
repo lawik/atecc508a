@@ -15,8 +15,6 @@ defmodule ATECC508A.Request do
   alias ATECC508A.Transport
   alias ATECC508A.Host
 
-  require Logger
-
   @type zone :: :config | :otp | :data
   @type slot :: 0..15
   @type block :: 0..3
@@ -341,13 +339,7 @@ defmodule ATECC508A.Request do
         with {:ok, <<0>>} <- request.(check_req, 1000, 1),
              {:ok, <<result::8, 0::24>>} <- request.(latch_req, 998, 4) do
           {:ok, result}
-        else
-          err ->
-            Logger.error("Failed: #{inspect(err)}")
         end
-      else
-        err ->
-          Logger.error("Failed: #{inspect(err)}")
       end
     end)
   end
