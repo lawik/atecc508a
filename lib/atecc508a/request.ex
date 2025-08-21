@@ -13,6 +13,7 @@ defmodule ATECC508A.Request do
   """
 
   alias ATECC508A.Transport
+  alias ATECC508A.Host
 
   require Logger
 
@@ -230,52 +231,6 @@ defmodule ATECC508A.Request do
     transport_request(transport, payload, 998, 32)
   end
 
-  @doc """
-  Get TempKey state
-  """
-  @spec get_tempkey(Transport.t()) :: {:ok, binary()} | {:error, atom()}
-  def get_tempkey(transport) do
-    payload = <<@atecc508a_op_info, 2, 0, 0>>
-
-    # Timeout is arbitrary
-    case transport_request(transport, payload, 200, 4) do
-      {:ok, <<no_mac::1, genkey_data::1, gendig_data::1, source_flag::1, key_id::3>>} ->
-        {:ok,
-         %{
-           no_mac: no_mac == 1,
-           gen: genkey_data == 1,
-           gen_dig: gendig_data == 1,
-           source: source_flag == 1,
-           key_id: key_id
-         }}
-
-      {error, _retry} ->
-        error
-    end
-  end
-
-  @doc """
-  Get persistent latch value.
-  """
-  @spec get_latch(Transport.t()) :: {:ok, binary()} | {:error, atom()}
-  def get_latch(transport) do
-    payload = <<@atecc508a_op_info, 4, 0, 0>>
-
-    # Timeout is arbitrary
-    transport_request(transport, payload, 200, 4)
-  end
-
-  @doc """
-  Set persistent latch.
-  """
-  @spec set_latch(Transport.t()) :: {:ok, binary()} | {:error, atom()}
-  def set_latch(transport) do
-    payload = <<@atecc508a_op_info, 4, <<0::6, 1::1, 1::1>>, 0>>
-
-    # Timeout is arbitrary
-    transport_request(transport, payload, 200, 4)
-  end
-
   def set_temp_key(transport, bytes) do
     # 1-byte nonce
     nonce_mode = <<
@@ -295,50 +250,6 @@ defmodule ATECC508A.Request do
       100,
       1
     )
-  end
-
-  def nonce_test(transport) do
-    bytes = "deadbeefdeadbeefdeadbeefdeadbeef"
-    # 1-byte nonce
-    nonce_mode = <<
-      # tempkey
-      0::2,
-      # 32 bytes
-      0::1,
-      # must be zero
-      0::3,
-      # pass-through mode
-      3::2
-    >>
-
-    a =
-      transport_request(
-        transport,
-        <<@atecc508a_op_nonce, nonce_mode::binary, 0::size(16), bytes::binary>>,
-        100,
-        1
-      )
-
-    nonce_mode = <<
-      # tempkey :: ignored
-      0::2,
-      # 32 bytes
-      0::1,
-      # must be zero
-      0::3,
-      # Generate random nonce
-      0::2
-    >>
-
-    b =
-      transport_request(
-        transport,
-        <<@atecc508a_op_nonce, nonce_mode::binary, 0::size(16), bytes::binary>>,
-        100,
-        32
-      )
-
-    {a, b}
   end
 
   def sha(transport, data) do
@@ -367,7 +278,18 @@ defmodule ATECC508A.Request do
   end
 
   @doc """
-  Sign a SHA256 digest.
+  Perform a transaction to authenticate volatile key protection using an activation key.
+
+  This takes the key slot holding the activation key (likely to be slot 1) and the activation key.
+
+  The transaction steps are:
+  - Generate a nonce inside the device sourced by the device RNG and a seed from the host. This returns the RNG output.
+  - Generate the identical nonce on the host based on the RNG and seed.
+  - Generate the CheckMac digest on the host using the activation key and produce a digest.
+  - Send the digest into the device CheckMac command to verify the activation key. This authorizes the transaction.
+  - Set the persistent latch to enable the protected keys.
+
+  Returns `{:ok <<0>>}` for a success. Returns `{:ok, <<1>>}` for a mismatched checkmac. Returns an error tuple for other errors.
   """
   @spec auth_volatile_key(Transport.t(), slot(), binary()) ::
           {:ok, binary()} | {:error, atom()}
@@ -402,16 +324,15 @@ defmodule ATECC508A.Request do
 
       <<latch_req::4-bytes>> = <<@atecc508a_op_info, 4, 0::6, 3::2, 0::8>>
 
-      <<_::20-bytes>> = rand = :crypto.strong_rand_bytes(20)
+      <<_::20-bytes>> = rand = Host.rand(20)
 
       # First nonce generates a random nonce to TempKey, sets TempKey.SourceFlag = Rand
       # and returns the random value
       nonce_req_seed = <<@atecc508a_op_nonce, nonce_mode::binary, 0::1, 0::15, rand::binary>>
 
       with {:ok, <<rng::32-bytes>>} <- request.(nonce_req_seed, 100, 32),
-           {:ok, <<nonce::32-bytes>>} <- rand_to_nonce(rng, rand, nonce_mode) do
-        {msg, other} = build_checkmac_msg(key, nonce, serial_number)
-        digest = :crypto.hash(:sha256, msg)
+           {:ok, <<nonce::32-bytes>>} <- Host.random_nonce(rng, rand, nonce_mode) do
+        %{digest: digest, other: other} = Host.checkmac(key, nonce, serial_number)
 
         <<check_req::81-bytes>> =
           <<@atecc508a_op_checkmac, checkmac_mode::1-bytes, key_id::little-16, 0::256,
@@ -550,72 +471,4 @@ defmodule ATECC508A.Request do
 
   defp return_status({:ok, _}), do: :ok
   defp return_status(other), do: other
-
-  defp build_checkmac_msg(key, nonce, serial_number) do
-    <<sn0_1::2-bytes, _sn2_3::2-bytes, _sn4_7::4-bytes, sn8::1-bytes>> = serial_number
-
-    {<<
-       key::32-bytes,
-       # pad key to 32 bytes
-       # 0::size(16 * 8),
-       nonce::32-bytes,
-       0::size(4 * 8),
-       0::size(8 * 8),
-       0::size(3 * 8),
-       sn8::1-bytes,
-       0::size(4 * 8),
-       sn0_1::2-bytes,
-       0::size(2 * 8)
-     >>, <<0::size(13 * 8)>>}
-  end
-
-  defp build_mac_msg(key, nonce, opcode, mode, param2, serial_number) do
-
-    <<sn0_1::2-bytes, _sn2_3::2-bytes, _sn4_7::4-bytes, sn8::1-bytes>> = serial_number
-    length = 88
-
-    msg =
-      [
-        <<
-          key::32-bytes
-        >>,
-        <<nonce::32-bytes>>,
-        <<opcode::8>>,
-        <<mode::1-bytes>>,
-        <<param2::little-16>>,
-        <<0::size(8 * 8)>>,
-        <<0::size(3 * 8)>>,
-        <<sn8::1-bytes>>,
-        # <<sn4_7::4-bytes>>,
-        <<0::size(4 * 8)>>,
-        <<sn0_1::2-bytes>>,
-        # <<sn2_3::2-bytes>>
-        <<0::size(2 * 8)>>
-      ]
-      |> IO.iodata_to_binary()
-
-    ^length = byte_size(msg)
-
-    {
-      msg,
-      # OtherData
-      <<_::13-bytes>> = <<
-        opcode::8,
-        mode::1-bytes,
-        param2::little-16,
-        0::size(3 * 8),
-        sn8::1-bytes,
-        0::size(4 * 8),
-        sn0_1::2-bytes,
-        0::size(2 * 8)
-      >>
-    }
-  end
-
-  defp rand_to_nonce(<<rng::32-bytes>>, <<rand::20-bytes>>, <<nonce_mode::1-bytes>>) do
-    msg =
-      <<rng::32-bytes, rand::20-bytes, @atecc508a_op_nonce::8, nonce_mode::1-bytes, 0x00::8>>
-
-    {:ok, :crypto.hash(:sha256, msg)}
-  end
 end

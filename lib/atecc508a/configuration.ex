@@ -59,7 +59,6 @@ defmodule ATECC508A.Configuration do
           rfu: <<_::16>>
         }
 
-
   @doc """
   Read the configuration
   """
@@ -331,7 +330,8 @@ defmodule ATECC508A.Configuration do
   end
 
   @spec supports_volatile?(t()) :: boolean()
-  def supports_volatile?(%__MODULE__{rev_num: rev_num}) when rev_num in [:ecc608a_1, :ecc608_2, :ecc608b] do
+  def supports_volatile?(%__MODULE__{rev_num: rev_num})
+      when rev_num in [:ecc608a_1, :ecc608_2, :ecc608b] do
     true
   end
 
